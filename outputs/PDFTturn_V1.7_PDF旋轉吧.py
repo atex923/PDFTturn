@@ -209,6 +209,7 @@ class BaseTab(ttk.Frame):
         self.thumbs = []
         self.drag_from = None
         self.drag_cards = []
+        self.resize_after_id = None
 
     def enable_drop(self, widget, callback):
         if DND_FILES is None:
@@ -221,6 +222,26 @@ class BaseTab(ttk.Frame):
             child.destroy()
         self.thumbs.clear()
         self.drag_cards = []
+
+    def enable_responsive_layout(self, area):
+        area.canvas.bind("<Configure>", self.schedule_layout, add="+")
+
+    def schedule_layout(self, _event=None):
+        if self.resize_after_id:
+            self.after_cancel(self.resize_after_id)
+        self.resize_after_id = self.after(80, self.relayout_cards)
+
+    def columns_for_width(self, card_width):
+        area_width = self.area.canvas.winfo_width() if hasattr(self, "area") else self.winfo_width()
+        return max(1, area_width // card_width)
+
+    def relayout_cards(self):
+        self.resize_after_id = None
+        if not self.drag_cards:
+            return
+        columns = self.get_columns()
+        for pos, card in enumerate(self.drag_cards):
+            card.grid_configure(row=pos // columns, column=pos % columns)
 
     def choose_pdf(self):
         initialdir = self.app.last_dir if self.app.last_dir else os.getcwd()
@@ -286,6 +307,7 @@ class RotateTab(BaseTab):
         super().__init__(app, notebook)
         self.pdf_path = None
         self.pages = []
+        self.page_widgets = []
         self._build()
 
     def _build(self):
@@ -302,6 +324,7 @@ class RotateTab(BaseTab):
         self.title.pack(anchor="w", pady=(0, 8))
         self.area = ScrollArea(self)
         self.area.pack(fill="both", expand=True)
+        self.enable_responsive_layout(self.area)
         self.enable_drop(self, self.load_drop)
         self.bind_all("<Control-MouseWheel>", self.zoom)
 
@@ -334,9 +357,10 @@ class RotateTab(BaseTab):
 
     def render(self):
         self.clear_frame(self.area.content)
+        self.page_widgets = []
         if not self.pdf_path:
             return
-        columns = max(1, self.winfo_width() // (self.thumb_size.get() + 48))
+        columns = self.get_columns()
         image_box_height = int(self.thumb_size.get() * 1.45)
         for pos, item in enumerate(self.pages):
             card = ttk.Frame(self.area.content, padding=8)
@@ -350,12 +374,28 @@ class RotateTab(BaseTab):
             label = ttk.Label(image_box, image=thumb)
             label.place(relx=0.5, rely=0.5, anchor="center")
             self.bind_drag_sort(label, pos)
-            ttk.Label(card, text=f"第 {pos + 1} 頁 / {item['rotation'] % 360}°").pack(pady=(6, 4))
+            page_label = ttk.Label(card, text=f"第 {pos + 1} 頁 / {item['rotation'] % 360}°")
+            page_label.pack(pady=(6, 4))
             buttons = ttk.Frame(card)
             buttons.pack()
             ttk.Button(buttons, text="左轉", width=6, command=lambda p=pos: self.rotate_one(p, -90)).pack(side="left")
             ttk.Button(buttons, text="右轉", width=6, command=lambda p=pos: self.rotate_one(p, 90)).pack(side="left", padx=2)
             ttk.Button(buttons, text="重設", width=6, command=lambda p=pos: self.reset_one(p)).pack(side="left")
+            self.page_widgets.append({"image": label, "label": page_label})
+
+    def get_columns(self):
+        return self.columns_for_width(self.thumb_size.get() + 48)
+
+    def update_page_view(self, pos):
+        if not self.pdf_path or pos >= len(self.page_widgets):
+            return
+        item = self.pages[pos]
+        thumb = make_thumbnail(self.pdf_path, item["index"], self.thumb_size.get(), item["rotation"])
+        self.thumbs[pos] = thumb
+        widgets = self.page_widgets[pos]
+        widgets["image"].configure(image=thumb)
+        widgets["image"].image = thumb
+        widgets["label"].configure(text=f"第 {pos + 1} 頁 / {item['rotation'] % 360}°")
 
     def end_drag(self, event):
         to_pos = self.find_drop_position(event)
@@ -366,21 +406,21 @@ class RotateTab(BaseTab):
 
     def rotate_one(self, pos, degrees):
         self.pages[pos]["rotation"] = (self.pages[pos]["rotation"] + degrees) % 360
-        self.render()
+        self.update_page_view(pos)
 
     def reset_one(self, pos):
         self.pages[pos]["rotation"] = 0
-        self.render()
+        self.update_page_view(pos)
 
     def rotate_all(self, degrees):
-        for item in self.pages:
+        for pos, item in enumerate(self.pages):
             item["rotation"] = (item["rotation"] + degrees) % 360
-        self.render()
+            self.update_page_view(pos)
 
     def reset_all(self):
-        for item in self.pages:
+        for pos, item in enumerate(self.pages):
             item["rotation"] = 0
-        self.render()
+            self.update_page_view(pos)
 
     def export_pdf(self):
         if not self.pdf_path:
@@ -522,6 +562,7 @@ class MergeTab(BaseTab):
         self.title.pack(anchor="w", pady=(0, 8))
         self.area = ScrollArea(self)
         self.area.pack(fill="both", expand=True)
+        self.enable_responsive_layout(self.area)
         self.enable_drop(self, self.load_drop)
 
     def add_files(self):
@@ -538,9 +579,10 @@ class MergeTab(BaseTab):
     def render(self):
         self.clear_frame(self.area.content)
         self.title.configure(text=f"合併清單 / {len(self.files)} 個檔案")
+        columns = self.get_columns()
         for pos, path in enumerate(self.files):
             card = ttk.Frame(self.area.content, padding=8)
-            card.grid(row=pos // 4, column=pos % 4, padx=6, pady=6, sticky="n")
+            card.grid(row=pos // columns, column=pos % columns, padx=6, pady=6, sticky="n")
             self.drag_cards.append(card)
             thumb = make_thumbnail(path, 0, 150)
             self.thumbs.append(thumb)
@@ -549,6 +591,9 @@ class MergeTab(BaseTab):
             self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"{pos + 1}. {os.path.basename(path)}", wraplength=160).pack(pady=(6, 4))
             ttk.Button(card, text="移除", command=lambda p=pos: self.remove(p)).pack()
+
+    def get_columns(self):
+        return self.columns_for_width(198)
 
     def end_drag(self, event):
         to_pos = self.find_drop_position(event)
@@ -606,6 +651,7 @@ class EditTab(BaseTab):
         self.title.pack(anchor="w", pady=(0, 8))
         self.area = ScrollArea(self)
         self.area.pack(fill="both", expand=True)
+        self.enable_responsive_layout(self.area)
         self.enable_drop(self, self.load_drop)
 
     def open_pdf(self):
@@ -666,12 +712,13 @@ class EditTab(BaseTab):
         if not self.base_path:
             return
         self.title.configure(text=f"{os.path.basename(self.base_path)} / 目前 {len(self.pages)} 頁")
+        columns = self.get_columns()
         for pos, item in enumerate(self.pages):
             color = (80, 160, 255, 70) if item["inserted"] else None
             if item["delete"].get():
                 color = (255, 80, 80, 90)
             card = ttk.Frame(self.area.content, padding=8)
-            card.grid(row=pos // 4, column=pos % 4, padx=6, pady=6, sticky="n")
+            card.grid(row=pos // columns, column=pos % columns, padx=6, pady=6, sticky="n")
             self.drag_cards.append(card)
             thumb = make_thumbnail(item["path"], item["index"], 150, mark=color)
             self.thumbs.append(thumb)
@@ -680,6 +727,9 @@ class EditTab(BaseTab):
             self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"第 {pos + 1} 頁", wraplength=150).pack(pady=(6, 2))
             ttk.Checkbutton(card, text="刪除", variable=item["delete"], command=self.render).pack()
+
+    def get_columns(self):
+        return self.columns_for_width(198)
 
     def end_drag(self, event):
         to_pos = self.find_drop_position(event)
