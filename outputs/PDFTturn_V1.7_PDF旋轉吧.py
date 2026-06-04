@@ -168,12 +168,37 @@ class ScrollArea(ttk.Frame):
         self.scrollbar.pack(side="right", fill="y")
         self.content.bind("<Configure>", self._sync_scroll_region)
         self.canvas.bind("<Configure>", self._sync_width)
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+        self.content.bind("<Enter>", self._bind_mousewheel)
+        self.content.bind("<Leave>", self._unbind_mousewheel)
 
     def _sync_scroll_region(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _sync_width(self, event):
         self.canvas.itemconfigure(self.window_id, width=event.width)
+
+    def _bind_mousewheel(self, _event=None):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event=None):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event):
+        if event.state & 0x0004:
+            return
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(delta, "units")
 
 
 class BaseTab(ttk.Frame):
@@ -189,7 +214,7 @@ class BaseTab(ttk.Frame):
         if DND_FILES is None:
             return
         widget.drop_target_register(DND_FILES)
-        widget.dnd_bind("<<Drop>>", lambda event: callback(parse_drop_files(event.data)))
+        widget.dnd_bind("<<Drop>>", lambda event: callback(parse_drop_files(event.data), event))
 
     def clear_frame(self, frame):
         for child in frame.winfo_children():
@@ -290,7 +315,7 @@ class RotateTab(BaseTab):
         if path:
             self.load_pdf(path)
 
-    def load_drop(self, paths):
+    def load_drop(self, paths, _event=None):
         if paths:
             self.load_pdf(paths[0])
 
@@ -312,14 +337,18 @@ class RotateTab(BaseTab):
         if not self.pdf_path:
             return
         columns = max(1, self.winfo_width() // (self.thumb_size.get() + 48))
+        image_box_height = int(self.thumb_size.get() * 1.45)
         for pos, item in enumerate(self.pages):
             card = ttk.Frame(self.area.content, padding=8)
             card.grid(row=pos // columns, column=pos % columns, padx=6, pady=6, sticky="n")
             self.drag_cards.append(card)
             thumb = make_thumbnail(self.pdf_path, item["index"], self.thumb_size.get(), item["rotation"])
             self.thumbs.append(thumb)
-            label = ttk.Label(card, image=thumb)
-            label.pack()
+            image_box = ttk.Frame(card, width=self.thumb_size.get(), height=image_box_height)
+            image_box.pack_propagate(False)
+            image_box.pack()
+            label = ttk.Label(image_box, image=thumb)
+            label.place(relx=0.5, rely=0.5, anchor="center")
             self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"第 {pos + 1} 頁 / {item['rotation'] % 360}°").pack(pady=(6, 4))
             buttons = ttk.Frame(card)
@@ -420,7 +449,7 @@ class CompressTab(BaseTab):
         if path:
             self.load_pdf(path)
 
-    def load_drop(self, paths):
+    def load_drop(self, paths, _event=None):
         if paths:
             self.load_pdf(paths[0])
 
@@ -498,7 +527,7 @@ class MergeTab(BaseTab):
     def add_files(self):
         self.load_drop(self.choose_pdfs())
 
-    def load_drop(self, paths):
+    def load_drop(self, paths, _event=None):
         self.files.extend(paths)
         self.render()
 
@@ -587,7 +616,7 @@ class EditTab(BaseTab):
     def insert_pdf(self):
         self.load_drop(self.choose_pdfs())
 
-    def load_drop(self, paths):
+    def load_drop(self, paths, event=None):
         if not paths:
             return
         if not self.base_path:
@@ -595,8 +624,11 @@ class EditTab(BaseTab):
             for path in paths[1:]:
                 self.add_insert(path)
         else:
+            insert_at = self.find_drop_position(event) if event else None
+            if insert_at is not None:
+                insert_at += 1
             for path in paths:
-                self.add_insert(path)
+                insert_at = self.add_insert(path, insert_at)
         self.render()
 
     def load_base(self, path):
@@ -611,16 +643,23 @@ class EditTab(BaseTab):
         self.pages = [{"path": path, "index": i, "inserted": False, "delete": tk.BooleanVar(value=False)} for i in range(count)]
         self.render()
 
-    def add_insert(self, path):
+    def add_insert(self, path, insert_at=None):
         try:
             doc = fitz.open(path)
             count = doc.page_count
             doc.close()
         except Exception as exc:
             messagebox.showerror("插入失敗", f"{path}\n{exc}")
-            return
-        for i in range(count):
-            self.pages.append({"path": path, "index": i, "inserted": True, "delete": tk.BooleanVar(value=False)})
+            return insert_at
+        new_pages = [
+            {"path": path, "index": i, "inserted": True, "delete": tk.BooleanVar(value=False)}
+            for i in range(count)
+        ]
+        if insert_at is None:
+            self.pages.extend(new_pages)
+            return None
+        self.pages[insert_at:insert_at] = new_pages
+        return insert_at + len(new_pages)
 
     def render(self):
         self.clear_frame(self.area.content)
