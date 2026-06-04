@@ -182,6 +182,8 @@ class BaseTab(ttk.Frame):
         self.app = app
         self.thumb_size = tk.IntVar(value=150)
         self.thumbs = []
+        self.drag_from = None
+        self.drag_cards = []
 
     def enable_drop(self, widget, callback):
         if DND_FILES is None:
@@ -193,6 +195,7 @@ class BaseTab(ttk.Frame):
         for child in frame.winfo_children():
             child.destroy()
         self.thumbs.clear()
+        self.drag_cards = []
 
     def choose_pdf(self):
         initialdir = self.app.last_dir if self.app.last_dir else os.getcwd()
@@ -216,13 +219,48 @@ class BaseTab(ttk.Frame):
             self.app.last_dir = os.path.dirname(paths[0])
         return list(paths)
 
+    def bind_drag_sort(self, widget, pos):
+        widget.bind("<ButtonPress-1>", lambda event, p=pos: self.start_drag(event, p))
+        widget.bind("<ButtonRelease-1>", self.end_drag)
+
+    def start_drag(self, _event, pos):
+        self.drag_from = pos
+
+    def find_drop_position(self, event):
+        if not self.drag_cards:
+            return None
+        x_root = event.x_root
+        y_root = event.y_root
+        nearest = None
+        nearest_distance = None
+        for pos, card in enumerate(self.drag_cards):
+            left = card.winfo_rootx()
+            top = card.winfo_rooty()
+            right = left + card.winfo_width()
+            bottom = top + card.winfo_height()
+            if left <= x_root <= right and top <= y_root <= bottom:
+                return pos
+            center_x = left + card.winfo_width() / 2
+            center_y = top + card.winfo_height() / 2
+            distance = (center_x - x_root) ** 2 + (center_y - y_root) ** 2
+            if nearest_distance is None or distance < nearest_distance:
+                nearest = pos
+                nearest_distance = distance
+        return nearest
+
+    def move_item(self, items, from_pos, to_pos):
+        if from_pos is None or to_pos is None or from_pos == to_pos:
+            return False
+        item = items.pop(from_pos)
+        items.insert(to_pos, item)
+        return True
+
 
 class RotateTab(BaseTab):
     def __init__(self, app, notebook):
         super().__init__(app, notebook)
         self.pdf_path = None
         self.pages = []
-        self.drag_from = None
         self._build()
 
     def _build(self):
@@ -277,12 +315,12 @@ class RotateTab(BaseTab):
         for pos, item in enumerate(self.pages):
             card = ttk.Frame(self.area.content, padding=8)
             card.grid(row=pos // columns, column=pos % columns, padx=6, pady=6, sticky="n")
+            self.drag_cards.append(card)
             thumb = make_thumbnail(self.pdf_path, item["index"], self.thumb_size.get(), item["rotation"])
             self.thumbs.append(thumb)
             label = ttk.Label(card, image=thumb)
             label.pack()
-            label.bind("<ButtonPress-1>", lambda _e, p=pos: self.start_drag(p))
-            label.bind("<ButtonRelease-1>", lambda _e, p=pos: self.end_drag(p))
+            self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"第 {pos + 1} 頁 / {item['rotation'] % 360}°").pack(pady=(6, 4))
             buttons = ttk.Frame(card)
             buttons.pack()
@@ -290,17 +328,12 @@ class RotateTab(BaseTab):
             ttk.Button(buttons, text="右轉", width=6, command=lambda p=pos: self.rotate_one(p, 90)).pack(side="left", padx=2)
             ttk.Button(buttons, text="重設", width=6, command=lambda p=pos: self.reset_one(p)).pack(side="left")
 
-    def start_drag(self, pos):
-        self.drag_from = pos
-
-    def end_drag(self, pos):
-        if self.drag_from is None or self.drag_from == pos:
-            self.drag_from = None
-            return
-        item = self.pages.pop(self.drag_from)
-        self.pages.insert(pos, item)
+    def end_drag(self, event):
+        to_pos = self.find_drop_position(event)
+        moved = self.move_item(self.pages, self.drag_from, to_pos)
         self.drag_from = None
-        self.render()
+        if moved:
+            self.render()
 
     def rotate_one(self, pos, degrees):
         self.pages[pos]["rotation"] = (self.pages[pos]["rotation"] + degrees) % 360
@@ -354,6 +387,9 @@ class CompressTab(BaseTab):
         super().__init__(app, notebook)
         self.pdf_path = None
         self.quality = tk.IntVar(value=70)
+        self.original_size = tk.StringVar(value="原有檔案大小\n-")
+        self.estimated_size = tk.StringVar(value="預計壓縮後大小\n-")
+        self.actual_size = tk.StringVar(value="壓縮後實際大小\n-")
         self._build()
 
     def _build(self):
@@ -364,7 +400,19 @@ class CompressTab(BaseTab):
         ttk.Scale(toolbar, from_=35, to=95, variable=self.quality, command=lambda _v: self.update_estimate()).pack(side="left", fill="x", expand=True)
         ttk.Button(toolbar, text="輸出壓縮PDF", command=self.export_pdf).pack(side="right", padx=(10, 0))
         self.info = ttk.Label(self, text="請開啟或拖曳 PDF 到此分頁")
-        self.info.pack(anchor="w")
+        self.info.pack(anchor="w", pady=(0, 12))
+        stats = ttk.Frame(self)
+        stats.pack(fill="x", pady=(0, 12))
+        for variable in (self.original_size, self.estimated_size, self.actual_size):
+            ttk.Label(
+                stats,
+                textvariable=variable,
+                style="Stat.TLabel",
+                anchor="center",
+                justify="center",
+                relief="raised",
+                borderwidth=2,
+            ).pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.enable_drop(self, self.load_drop)
 
     def open_pdf(self):
@@ -378,6 +426,7 @@ class CompressTab(BaseTab):
 
     def load_pdf(self, path):
         self.pdf_path = path
+        self.actual_size.set("壓縮後實際大小\n-")
         self.update_estimate()
 
     def update_estimate(self):
@@ -387,9 +436,9 @@ class CompressTab(BaseTab):
         quality = self.quality.get()
         factor = max(0.20, quality / 115)
         estimate = original * factor
-        self.info.configure(
-            text=f"{os.path.basename(self.pdf_path)} / 原始 {file_size_text(self.pdf_path)} / 預估 {estimate / 1024 / 1024:.1f} MB / 品質 {quality}"
-        )
+        self.info.configure(text=f"{os.path.basename(self.pdf_path)} / 品質 {quality}")
+        self.original_size.set(f"原有檔案大小\n{file_size_text(self.pdf_path)}")
+        self.estimated_size.set(f"預計壓縮後大小\n{estimate / 1024 / 1024:.1f} MB")
 
     def export_pdf(self):
         if not self.pdf_path:
@@ -419,6 +468,7 @@ class CompressTab(BaseTab):
                 new_page.insert_image(rect, filename=str(temp))
                 temp.unlink(missing_ok=True)
             result.save(output, garbage=4, deflate=True)
+            self.actual_size.set(f"壓縮後實際大小\n{file_size_text(output)}")
             messagebox.showinfo("完成", f"已輸出：\n{output}\n\n實際大小：{file_size_text(output)}")
         except Exception as exc:
             messagebox.showerror("輸出失敗", str(exc))
@@ -431,7 +481,6 @@ class MergeTab(BaseTab):
     def __init__(self, app, notebook):
         super().__init__(app, notebook)
         self.files = []
-        self.drag_from = None
         self._build()
 
     def _build(self):
@@ -463,26 +512,21 @@ class MergeTab(BaseTab):
         for pos, path in enumerate(self.files):
             card = ttk.Frame(self.area.content, padding=8)
             card.grid(row=pos // 4, column=pos % 4, padx=6, pady=6, sticky="n")
+            self.drag_cards.append(card)
             thumb = make_thumbnail(path, 0, 150)
             self.thumbs.append(thumb)
             label = ttk.Label(card, image=thumb)
             label.pack()
-            label.bind("<ButtonPress-1>", lambda _e, p=pos: self.start_drag(p))
-            label.bind("<ButtonRelease-1>", lambda _e, p=pos: self.end_drag(p))
+            self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"{pos + 1}. {os.path.basename(path)}", wraplength=160).pack(pady=(6, 4))
             ttk.Button(card, text="移除", command=lambda p=pos: self.remove(p)).pack()
 
-    def start_drag(self, pos):
-        self.drag_from = pos
-
-    def end_drag(self, pos):
-        if self.drag_from is None or self.drag_from == pos:
-            self.drag_from = None
-            return
-        item = self.files.pop(self.drag_from)
-        self.files.insert(pos, item)
+    def end_drag(self, event):
+        to_pos = self.find_drop_position(event)
+        moved = self.move_item(self.files, self.drag_from, to_pos)
         self.drag_from = None
-        self.render()
+        if moved:
+            self.render()
 
     def remove(self, pos):
         self.files.pop(pos)
@@ -589,11 +633,21 @@ class EditTab(BaseTab):
                 color = (255, 80, 80, 90)
             card = ttk.Frame(self.area.content, padding=8)
             card.grid(row=pos // 4, column=pos % 4, padx=6, pady=6, sticky="n")
+            self.drag_cards.append(card)
             thumb = make_thumbnail(item["path"], item["index"], 150, mark=color)
             self.thumbs.append(thumb)
-            ttk.Label(card, image=thumb).pack()
+            label = ttk.Label(card, image=thumb)
+            label.pack()
+            self.bind_drag_sort(label, pos)
             ttk.Label(card, text=f"第 {pos + 1} 頁", wraplength=150).pack(pady=(6, 2))
             ttk.Checkbutton(card, text="刪除", variable=item["delete"], command=self.render).pack()
+
+    def end_drag(self, event):
+        to_pos = self.find_drop_position(event)
+        moved = self.move_item(self.pages, self.drag_from, to_pos)
+        self.drag_from = None
+        if moved:
+            self.render()
 
     def export_pdf(self):
         if not self.pages:
@@ -652,6 +706,13 @@ class PDFTturnApp:
         style.configure("TButton", padding=(10, 5))
         style.configure("TNotebook", background="#f6f7f8", borderwidth=0)
         style.configure("TNotebook.Tab", padding=(18, 8))
+        style.configure(
+            "Stat.TLabel",
+            background="#ffffff",
+            foreground="#202124",
+            font=("Microsoft JhengHei UI", 16, "bold"),
+            padding=(18, 18),
+        )
 
     def _build(self):
         header = ttk.Frame(self.root, padding=(16, 12))
